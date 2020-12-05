@@ -138,14 +138,24 @@ class Sensor:
         from scd30 import SCD30 #https://github.com/agners/micropython-scd30
         self.bme = BME280(i2c=i2c)
         self.scd30 = SCD30(i2c=i2c, addr=0x61)
-        # allow scd30 to initialize, so values are available
-        time.sleep_ms(2000)
         self.temp = 0
         self.pres = 0
         self.humi = 0
         self.co2c = 0
         self.temp2 = 0
         self.humi2 = 0
+        # allow BME280 to initialize, so values are available
+        time.sleep_ms(2000)
+        self.read()
+        # set ambient pressure calibration to SCD30 (to be set in mbar or hPa)
+        try:
+            self.scd30.start_continous_measurement(ambient_pressure=round(self.pres/100))
+        except:
+            print('Cannot set ambient pressure to SCD30')
+        # allow SCD30 to initialize, so values are available
+        while self.scd30.get_status_ready() == 0:
+            time.sleep_ms(100)
+        print('scd30 ready')
 
     def read (self):
         self.temp, self.pres, self.humi = self.bme.read_compensated_data()
@@ -180,15 +190,19 @@ class WebServer:
         self.sensor = sensor
 
     def get_page(self):
+      if not math.isnan(self.sensor.co2c):
+          co2c = str(round(self.sensor.co2c))
+      else:
+          co2c = "---"
       html = """<html><head> <title>Svante Web Interface</title> <meta name="viewport" content="width=device-width, initial-scale=1">
       <link rel="icon" href="data:,"> <style>html{font-family: Helvetica; display:inline-block; margin: 0px auto; text-align: center;}
       h1{color: #0F3376; padding: 2vh;}p{font-size: 1.5rem;}.button{display: inline-block; background-color: #e7bd3b; border: none;
       border-radius: 4px; color: white; padding: 16px 40px; text-decoration: none; font-size: 30px; margin: 2px; cursor: pointer;}
       .button2{background-color: #4286f4;}</style></head><body> <h1>Svante Web Interface</h1>
-      <p>Temperature: <strong>""" + str(round(self.sensor.temp,1)) + """</strong> &#176;C</p>
+      <p>Temperature: <strong>""" + str(round(self.sensor.temp,1)) + """ (""" + str(round(self.sensor.temp2,1)) + """)</strong> &#176;C</p>
       <p>Pressure: <strong>""" + str(round(self.sensor.pres/100)) + """</strong> hPa</p>
-      <p>Humidity: <strong>""" + str(round(self.sensor.humi,1)) + """</strong> &#37;</p>
-      <p>CO<sub>2</sub> concentraion: <strong>""" + str(round(self.sensor.co2c)) + """</strong> ppm</p>
+      <p>Humidity: <strong>""" + str(round(self.sensor.humi,1)) + """ (""" + str(round(self.sensor.humi2,1)) + """)</strong> &#37;</p>
+      <p>CO<sub>2</sub> concentraion: <strong>""" + co2c + """</strong> ppm</p>
       <p><a href="/?read"><button class="button">READ</button></a></p>
       </body></html>"""
       return html
