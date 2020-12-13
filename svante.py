@@ -8,6 +8,8 @@ print('loading Svante...')
 from machine import Pin, PWM, I2C
 import math
 import time
+import uasyncio as asyncio
+import tinyweb
 
 # TODO:
 # make sensor readings error-prone
@@ -40,53 +42,51 @@ class LED:
         # Neopixel to display different colour codes
         import neopixel
         self.pixels = neopixel.NeoPixel(Pin(pin, Pin.OUT), 1)
-        self.off()
+        self._rgb = (0, 0, 0)
+        self._h = 0.5 # between 0 and 1
+        self.set()
 
-    def colour (self, c):
-        if c == "green":
-            self.pixels[0] = (0,255,0)
-        elif c == "yellow":
-            self.pixels[0] = (255,200,0)
-        elif c == "red":
-            self.pixels[0] = (255,0,0)
-        elif c == "blue":
-            self.pixels[0] = (0,0,255)
-        elif c == "white":
-            self.pixels[0] = (255,255,255)
-        else:
-            pass
+    def set(self):
+        self.pixels[0] = (int(round(self._rgb[0] * self._h)),
+                          int(round(self._rgb[1] * self._h)),
+                          int(round(self._rgb[2] * self._h)))
         self.pixels.write()
-        self.status = True
+
+    @property
+    def brightness(self):
+        return self._h
+
+    @brightness.setter
+    def brightness(self, h):
+        if h >= 0 and h <=1 and isinstance(h, float):
+            self._h = h
+            self.set()
+        else:
+            print("Only brightness values between 0 and 1")
 
     def red (self):
-        self.pixels[0] = (255,0,0)
-        self.pixels.write()
-        self.status = True
+        self._rgb = (255,0,0)
+        self.set()
 
     def yellow (self):
-        self.pixels[0] = (255,200,0)
-        self.pixels.write()
-        self.status = True
+        self._rgb = (255,200,0)
+        self.set()
 
     def green (self):
-        self.pixels[0] = (0,255,0)
-        self.pixels.write()
-        self.status = True
+        self._rgb = (0,255,0)
+        self.set()
 
     def blue (self):
-        self.pixels[0] = (0,0,255)
-        self.pixels.write()
-        self.status = True
+        self._rgb = (0,0,255)
+        self.set()
 
     def white (self):
-        self.pixels[0] = (255,255,255)
-        self.pixels.write()
-        self.status = True
+        self._rgb = (255,255,255)
+        self.set()
 
     def off (self):
-        self.pixels[0] = (0,0,0)
-        self.pixels.write()
-        self.status = False
+        self._rgb = (0,0,0)
+        self.set()
 
 class Display:
     def __init__ (self, i2c, width=64, height=48):
@@ -127,7 +127,13 @@ class Display:
         else:
             self.oled.text("---", 0, 36)
         self.oled.text("ppm", x, 36)
-        self.oled.show()
+        try:
+            self.oled.show()
+        except:
+            print('Cannot update display.')
+            #  File "ssd1306.py", line 95, in show
+            #  File "ssd1306.py", line 115, in write_cmd
+            #  OSError: [Errno 19] ENODEV
 
 class Sensor:
     def __init__ (self, i2c):
@@ -176,80 +182,84 @@ class Sensor:
         print(self.humi2, " %")
 
 class WebServer:
-    def __init__ (self, led, display, sensor, port=80):
-        print('starting webserver...')
-        try:
-          import usocket as socket
-        except:
-          import socket
-        self.s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-        self.s.bind(('', port))
-        self.s.listen(5)
+    def __init__ (self, led, display, sensor, host='0.0.0.0', port=80, timeout=5):
         self.led = led
         self.display = display
         self.sensor = sensor
+        self.host = host
+        self.port = port
+        self.timeout = timeout
+        self.app = tinyweb.webserver(request_timeout=self.timeout)
+
+    async def index (self, request, response):
+        # Start HTTP response with content-type text/html
+        await response.start_html()
+        # Send actual HTML page
+        page = self.get_page()
+        await response.send(page)
+
+    def run (self):
+        self.app.add_route('/', self.index)
+        self.app.run(host=self.host, port=self.port) #loop_forever=False
 
     def get_page(self):
-      if not math.isnan(self.sensor.co2c):
-          co2c = str(round(self.sensor.co2c))
-      else:
-          co2c = "---"
-      html = """<html><head> <title>Svante Web Interface</title> <meta name="viewport" content="width=device-width, initial-scale=1">
-      <link rel="icon" href="data:,"> <style>html{font-family: Helvetica; display:inline-block; margin: 0px auto; text-align: center;}
-      h1{color: #0F3376; padding: 2vh;}p{font-size: 1.5rem;}.button{display: inline-block; background-color: #e7bd3b; border: none;
-      border-radius: 4px; color: white; padding: 16px 40px; text-decoration: none; font-size: 30px; margin: 2px; cursor: pointer;}
-      .button2{background-color: #4286f4;}</style></head><body> <h1>Svante Web Interface</h1>
-      <p>Temperature: <strong>""" + str(round(self.sensor.temp,1)) + """ (""" + str(round(self.sensor.temp2,1)) + """)</strong> &#176;C</p>
-      <p>Pressure: <strong>""" + str(round(self.sensor.pres/100)) + """</strong> hPa</p>
-      <p>Humidity: <strong>""" + str(round(self.sensor.humi,1)) + """ (""" + str(round(self.sensor.humi2,1)) + """)</strong> &#37;</p>
-      <p>CO<sub>2</sub> concentraion: <strong>""" + co2c + """</strong> ppm</p>
-      <p><a href="/?read"><button class="button">READ</button></a></p>
-      </body></html>"""
-      return html
-
-    def run(self):
-      conn, addr = self.s.accept()
-      print('Got a connection from %s' % str(addr))
-      request = conn.recv(1024)
-      request = str(request)
-      print('Content = %s' % request)
-      read = request.find('/?read')
-      if read == 6:
-        print('LED ON')
-        self.led.blue()
-      response = self.get_page()
-      conn.send('HTTP/1.1 200 OK\n')
-      conn.send('Content-Type: text/html\n')
-      conn.send('Connection: close\n\n')
-      conn.sendall(response)
-      conn.close()
+        if not math.isnan(self.sensor.co2c):
+            co2c = str(round(self.sensor.co2c))
+        else:
+            co2c = "---"
+        html = """
+        <html><head><title>Svante Web Interface</title>
+        <meta name="viewport" content="width=device-width, initial-scale=1">
+        <link rel="icon" href="data:,">
+        <style>html{font-family: Helvetica; display:inline-block; margin: 0px auto; text-align: center;}
+        h1{color: #0F3376; padding: 2vh;}p{font-size: 1.5rem;}.button{display: inline-block; background-color: #e7bd3b; border: none;
+        border-radius: 4px; color: white; padding: 16px 40px; text-decoration: none; font-size: 30px; margin: 2px; cursor: pointer;}
+        .button2{background-color: #4286f4;}</style>
+        </head><body>
+        <h1>Svante Web Interface</h1>
+        <p>Temperature: <strong>""" + str(round(self.sensor.temp,1)) + """ (""" + str(round(self.sensor.temp2,1)) + """)</strong> &#176;C</p>
+        <p>Pressure: <strong>""" + str(round(self.sensor.pres/100)) + """</strong> hPa</p>
+        <p>Humidity: <strong>""" + str(round(self.sensor.humi,1)) + """ (""" + str(round(self.sensor.humi2,1)) + """)</strong> &#37;</p>
+        <p>CO<sub>2</sub> concentraion: <strong>""" + co2c + """</strong> ppm</p>
+        <p><a href="/?read"><button class="button">READ</button></a></p>
+        </body></html>\n"""
+        return html
 
 
 # MAIN IMPLEMENTATION ----------------------------------------------------------
 
 # initialise modules and sensors
 i2c = I2C(scl=Pin(5), sda=Pin(4)) # TODO: id required, e.g. -1
-led = LED()
 display = Display(i2c)
 display.startup()
+led = LED()
 sensor = Sensor(i2c)
-webs = WebServer(led, display, sensor)
+webserver = WebServer(led, display, sensor)
 
-def run(sleep=2000):
+#TODO: move to class!!!
+# seperate measurement into continuous sensor logging, display and led updating, define them as coros for asyncio!!!
+async def measurement(sleep=5):
     while True:
+        print('M')
         sensor.read()
-
-        # led
         if sensor.co2c >= CRITICAL_LEVEL:
             led.red()
         elif sensor.co2c >= WARN_LEVEL:
             led.yellow()
         else:
             led.green()
-
-        # display
         display.tphco2(sensor.temp, sensor.pres, sensor.humi, sensor.co2c)
-        webs.run()
-        time.sleep_ms(sleep)
+        await asyncio.sleep(sleep)
 
-run()
+asyncio.create_task(measurement())
+
+async def shutdown():
+    print('Shutdown is running.')  # Happens in both cases
+    await asyncio.sleep(1)
+    print('done')
+
+try:
+    webserver.run()
+except KeyboardInterrupt: # is this even working?
+    print('Keyboard interrupt at loop level.')
+    asyncio.run(shutdown())
