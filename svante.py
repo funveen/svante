@@ -9,13 +9,15 @@ from machine import Pin, PWM, I2C
 import math
 import time
 import uasyncio as asyncio
-import tinyweb
+import tinyweb #https://github.com/belyalov/tinyweb
 
 # TODO:
+# double check asyncio and shutdown
 # make sensor readings error-prone
-# implement pressure assisted co2 calibration
-# make webserver and sensor readings asynchronous
-# test logging
+# optimise measurement/display intervals and adjust sensors accordingly for energy efficiency (consider average values in between intervals)
+# addtraffic lights to web page
+# use common config file for py and js
+# add configuration to web pages (wifi, switch LED on/off, switch display on/off)
 
 
 # CONSTANTS & SETUP ------------------------------------------------------------
@@ -33,6 +35,11 @@ import tinyweb
 #
 WARN_LEVEL = 800
 CRITICAL_LEVEL = 1000
+
+# How often a sensor reading is taken and processed (seconds)
+MEASUREMENT_INTERVAL = 10
+# How many sensor readings should be stored
+MAX_SAMPLE_HISTORY = 20
 
 
 # MODULES IMPLEMENTATION ---------------------------------------------------
@@ -131,9 +138,28 @@ class Display:
             self.oled.show()
         except:
             print('Cannot update display.')
-            #  File "ssd1306.py", line 95, in show
-            #  File "ssd1306.py", line 115, in write_cmd
-            #  OSError: [Errno 19] ENODEV
+
+class Readings:
+    def __init__ (self):
+        # separate value to avoid handling empty lists
+        self._latest = 0
+        self._list = []
+
+    @property
+    def value(self):
+        return self._latest
+
+    @value.setter
+    def value (self, v):
+        # evaluate nan
+        self._latest = v
+        self._list.append(v)
+        if len(self._list) > MAX_SAMPLE_HISTORY:
+            self._list.pop(0)
+
+    @property
+    def history (self):
+        return self._list
 
 class Sensor:
     def __init__ (self, i2c):
@@ -144,42 +170,46 @@ class Sensor:
         from scd30 import SCD30 #https://github.com/agners/micropython-scd30
         self.bme = BME280(i2c=i2c)
         self.scd30 = SCD30(i2c=i2c, addr=0x61)
-        self.temp = 0
-        self.pres = 0
-        self.humi = 0
-        self.co2c = 0
-        self.temp2 = 0
-        self.humi2 = 0
+        self.temp = Readings()
+        self.pres = Readings()
+        self.humi = Readings()
+        self.co2c = Readings()
+        self.temp2 = Readings()
+        self.humi2 = Readings()
         # allow BME280 to initialize, so values are available
         time.sleep_ms(2000)
-        self.read()
+        print('BME280 ready')
         # set ambient pressure calibration to SCD30 (to be set in mbar or hPa)
         try:
-            self.scd30.start_continous_measurement(ambient_pressure=round(self.pres/100))
+            self.scd30.start_continous_measurement(ambient_pressure=round(self.bme.read_compensated_data()[1]/100))
         except:
             print('Cannot set ambient pressure to SCD30')
         # allow SCD30 to initialize, so values are available
         while self.scd30.get_status_ready() == 0:
             time.sleep_ms(100)
-        print('scd30 ready')
+        print('SCD30 ready')
+        self.read()
 
     def read (self):
-        self.temp, self.pres, self.humi = self.bme.read_compensated_data()
         try:
-            self.co2c, self.temp2, self.humi2 = self.scd30.read_measurement()
+            self.temp.value, self.pres.value, self.humi.value = self.bme.read_compensated_data()
         except:
-            print("Cannot read CO2 sensor")
+            print("Cannot read BME280")
+        try:
+            self.co2c.value, self.temp2.value, self.humi2.value = self.scd30.read_measurement()
+        except:
+            print("Cannot read SCD30")
 
     def get_values (self):
-        return self.temp, self.pres, self.humi, self.co2c
+        return self.temp.value, self.pres.value, self.humi.value, self.co2c.value
 
     def print_values (self):
-        print(self.temp, " C")
-        print(self.pres/100, " hPa")
-        print(self.humi, " %")
-        print(self.co2c, " ppm")
-        print(self.temp2, " C")
-        print(self.humi2, " %")
+        print(self.temp.value, " C")
+        print(self.pres.value/100, " hPa")
+        print(self.humi.value, " %")
+        print(self.co2c.value, " ppm")
+        print(self.temp2.value, " C")
+        print(self.humi2.value, " %")
 
 class WebServer:
     def __init__ (self, led, display, sensor, host='0.0.0.0', port=80, timeout=5):
@@ -198,13 +228,38 @@ class WebServer:
         page = self.get_page()
         await response.send(page)
 
+    ### plain history values
+
+    async def temperature (self, request, response):
+        await response.start_html()
+        await response.send(str([round(x,1) for x in self.sensor.temp.history]))
+
+    async def pressure (self, request, response):
+        await response.start_html()
+        await response.send(str([round(x/100,1) for x in self.sensor.pres.history]))
+
+    async def humidity (self, request, response):
+        await response.start_html()
+        await response.send(str([round(x,1) for x in self.sensor.humi.history]))
+
+    async def co2concentration (self, request, response):
+        await response.start_html()
+        # replace nan float values with 0 to convert to int
+        await response.send(str([round(x) for x in [0 if math.isnan(i) else i for i in self.sensor.co2c.history]]))
+
     def run (self):
         self.app.add_route('/', self.index)
+
+        self.app.add_route('/temperature', self.temperature)
+        self.app.add_route('/pressure', self.pressure)
+        self.app.add_route('/humidity', self.humidity)
+        self.app.add_route('/co2concentration', self.co2concentration)
+
         self.app.run(host=self.host, port=self.port) #loop_forever=False
 
     def get_page(self):
-        if not math.isnan(self.sensor.co2c):
-            co2c = str(round(self.sensor.co2c))
+        if not math.isnan(self.sensor.co2c.value):
+            co2c = str(round(self.sensor.co2c.value))
         else:
             co2c = "---"
         html = """
@@ -217,9 +272,9 @@ class WebServer:
         .button2{background-color: #4286f4;}</style>
         </head><body>
         <h1>Svante Web Interface</h1>
-        <p>Temperature: <strong>""" + str(round(self.sensor.temp,1)) + """ (""" + str(round(self.sensor.temp2,1)) + """)</strong> &#176;C</p>
-        <p>Pressure: <strong>""" + str(round(self.sensor.pres/100)) + """</strong> hPa</p>
-        <p>Humidity: <strong>""" + str(round(self.sensor.humi,1)) + """ (""" + str(round(self.sensor.humi2,1)) + """)</strong> &#37;</p>
+        <p>Temperature: <strong>""" + str(round(self.sensor.temp.value,1)) + """ (""" + str(round(self.sensor.temp2.value,1)) + """)</strong> &#176;C</p>
+        <p>Pressure: <strong>""" + str(round(self.sensor.pres.value/100)) + """</strong> hPa</p>
+        <p>Humidity: <strong>""" + str(round(self.sensor.humi.value,1)) + """ (""" + str(round(self.sensor.humi2.value,1)) + """)</strong> &#37;</p>
         <p>CO<sub>2</sub> concentraion: <strong>""" + co2c + """</strong> ppm</p>
         <p><a href="/?read"><button class="button">READ</button></a></p>
         </body></html>\n"""
@@ -238,20 +293,20 @@ webserver = WebServer(led, display, sensor)
 
 #TODO: move to class!!!
 # seperate measurement into continuous sensor logging, display and led updating, define them as coros for asyncio!!!
-async def measurement(sleep=5):
+async def measurement(sleep):
     while True:
         print('M')
         sensor.read()
-        if sensor.co2c >= CRITICAL_LEVEL:
+        if sensor.co2c.value >= CRITICAL_LEVEL:
             led.red()
-        elif sensor.co2c >= WARN_LEVEL:
+        elif sensor.co2c.value >= WARN_LEVEL:
             led.yellow()
         else:
             led.green()
-        display.tphco2(sensor.temp, sensor.pres, sensor.humi, sensor.co2c)
+        display.tphco2(sensor.temp.value, sensor.pres.value, sensor.humi.value, sensor.co2c.value)
         await asyncio.sleep(sleep)
 
-asyncio.create_task(measurement())
+asyncio.create_task(measurement(sleep=MEASUREMENT_INTERVAL))
 
 async def shutdown():
     print('Shutdown is running.')  # Happens in both cases
