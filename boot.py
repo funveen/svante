@@ -1,5 +1,5 @@
 # This file is executed on every boot (including wake-boot from deepsleep)
-print('booting...')
+print('Booting...')
 
 #import uos
 #uos.dupterm(None, 1) # disable REPL on UART(0)
@@ -29,14 +29,14 @@ def wifi_connect():
     import network
     sta_if = network.WLAN(network.STA_IF)
     if not sta_if.isconnected():
-        print('connecting to network...')
+        print('Connecting to network...')
         sta_if.active(True)
         try:
             sta_if.connect(config.WIFI_SSID, config.WIFI_PASSWORD)
         except:
-            print("defined SSID not found.")
+            print("Defined SSID not found.")
         while not sta_if.isconnected():
             pass
-    print('network config:', sta_if.ifconfig())
+    print('Network config:', sta_if.ifconfig())
 
 wifi_connect()

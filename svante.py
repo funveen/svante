@@ -3,17 +3,15 @@
 
 # LIBRARIES --------------------------------------------------------------------
 
-print('loading Svante...')
+print('Loading Svante...')
 
 from machine import Pin, PWM, I2C
 import math
 import time
 import uasyncio as asyncio
-import tinyweb #https://github.com/belyalov/tinyweb
 
 # TODO:
 # double check asyncio and shutdown
-# make sensor readings error-prone
 # optimise measurement/display intervals and adjust sensors accordingly for energy efficiency (consider average values in between intervals)
 # addtraffic lights to web page
 # use common config file for py and js
@@ -112,27 +110,23 @@ class Display:
         self.oled.show()
 
     def tphco2 (self, temp, pres, humi, co2c, x=41):
-        # pressure to be provided in Pascal, displayed in hPa
         # x: horizontal unit position
         self.oled.fill(0)
 
-        self.oled.text(str(round(temp,1)), 0, 0)
+        self.oled.text(str(temp), 0, 0)
         self.oled.pixel(x,0,1)
         self.oled.pixel(x+1,0,1)
         self.oled.pixel(x,1,1)
         self.oled.pixel(x+1,1,1)
         self.oled.text("C", x+3, 0)
 
-        self.oled.text(str(round(pres/100)), 0, 12)
+        self.oled.text(str(pres), 0, 12)
         self.oled.text("hPa", x, 12)
 
-        self.oled.text(str(round(humi,1)), 0, 24)
+        self.oled.text(str(humi), 0, 24)
         self.oled.text("%", x, 24)
 
-        if not math.isnan(co2c):
-            self.oled.text(str(round(co2c)), 0, 36)
-        else:
-            self.oled.text("---", 0, 36)
+        self.oled.text(str(co2c), 0, 36)
         self.oled.text("ppm", x, 36)
         try:
             self.oled.show()
@@ -140,10 +134,11 @@ class Display:
             print('Cannot update display.')
 
 class Readings:
-    def __init__ (self):
-        # separate value to avoid handling empty lists
-        self._latest = 0
+    def __init__ (self, factor=1, *args):
+        self._latest = 0 # separate value to avoid handling empty lists
         self._list = []
+        self.factor = factor # optional factor to multiply new values
+        self.args = args # potentially the number of digits for round(), as round(5.3,0) returns float, but round(5.3) returns int
 
     @property
     def value(self):
@@ -151,7 +146,10 @@ class Readings:
 
     @value.setter
     def value (self, v):
-        # evaluate nan
+        # evaluate and replace nan
+        v = 0.0 if math.isnan(v) else v
+        # round or convert according to init values for factor and optional digits
+        v = round(v*self.factor,*self.args)
         self._latest = v
         self._list.append(v)
         if len(self._list) > MAX_SAMPLE_HISTORY:
@@ -163,22 +161,22 @@ class Readings:
 
 class Sensor:
     def __init__ (self, i2c):
-        print('initialising sensors...')
+        print('Initialising sensors...')
         # BME280 sensor to measure temperature,pressure and humidity
         from bme280_float import BME280 #https://github.com/robert-hh/BME280
         # SCD30 sensor to measure CO2 concentration
         from scd30 import SCD30 #https://github.com/agners/micropython-scd30
         self.bme = BME280(i2c=i2c)
         self.scd30 = SCD30(i2c=i2c, addr=0x61)
-        self.temp = Readings()
-        self.pres = Readings()
-        self.humi = Readings()
-        self.co2c = Readings()
-        self.temp2 = Readings()
-        self.humi2 = Readings()
+        self.temp = Readings(1,1)
+        self.pres = Readings(1/100) # convert from Pa to hPa, pass no rounding digits to get int
+        self.humi = Readings(1,1)
+        self.co2c = Readings(1) # pass no rounding digits to get int
+        self.temp2 = Readings(1,1)
+        self.humi2 = Readings(1,1)
         # allow BME280 to initialize, so values are available
         time.sleep_ms(2000)
-        print('BME280 ready')
+        print('BME280 ready.')
         # set ambient pressure calibration to SCD30 (to be set in mbar or hPa)
         try:
             self.scd30.start_continous_measurement(ambient_pressure=round(self.bme.read_compensated_data()[1]/100))
@@ -187,14 +185,14 @@ class Sensor:
         # allow SCD30 to initialize, so values are available
         while self.scd30.get_status_ready() == 0:
             time.sleep_ms(100)
-        print('SCD30 ready')
+        print('SCD30 ready.')
         self.read()
 
     def read (self):
         try:
             self.temp.value, self.pres.value, self.humi.value = self.bme.read_compensated_data()
         except:
-            print("Cannot read BME280")
+            print("Cannot read BME280.")
         try:
             self.co2c.value, self.temp2.value, self.humi2.value = self.scd30.read_measurement()
         except:
@@ -205,7 +203,7 @@ class Sensor:
 
     def print_values (self):
         print(self.temp.value, " C")
-        print(self.pres.value/100, " hPa")
+        print(self.pres.value, " hPa")
         print(self.humi.value, " %")
         print(self.co2c.value, " ppm")
         print(self.temp2.value, " C")
@@ -213,6 +211,8 @@ class Sensor:
 
 class WebServer:
     def __init__ (self, led, display, sensor, host='0.0.0.0', port=80, timeout=5):
+        print('Starting webserver...')
+        import tinyweb #https://github.com/belyalov/tinyweb
         self.led = led
         self.display = display
         self.sensor = sensor
@@ -228,27 +228,30 @@ class WebServer:
         page = self.get_page()
         await response.send(page)
 
+    async def charts (self, request, response):
+        await response.send_file('html/charts.html')
+
     ### plain history values
 
     async def temperature (self, request, response):
         await response.start_html()
-        await response.send(str([round(x,1) for x in self.sensor.temp.history]))
+        await response.send(str(self.sensor.temp.history))
 
     async def pressure (self, request, response):
         await response.start_html()
-        await response.send(str([round(x/100,1) for x in self.sensor.pres.history]))
+        await response.send(str(self.sensor.pres.history))
 
     async def humidity (self, request, response):
         await response.start_html()
-        await response.send(str([round(x,1) for x in self.sensor.humi.history]))
+        await response.send(str(self.sensor.humi.history))
 
     async def co2concentration (self, request, response):
         await response.start_html()
-        # replace nan float values with 0 to convert to int
-        await response.send(str([round(x) for x in [0 if math.isnan(i) else i for i in self.sensor.co2c.history]]))
+        await response.send(str(self.sensor.co2c.history))
 
     def run (self):
         self.app.add_route('/', self.index)
+        self.app.add_route('/charts', self.charts)
 
         self.app.add_route('/temperature', self.temperature)
         self.app.add_route('/pressure', self.pressure)
@@ -258,10 +261,6 @@ class WebServer:
         self.app.run(host=self.host, port=self.port) #loop_forever=False
 
     def get_page(self):
-        if not math.isnan(self.sensor.co2c.value):
-            co2c = str(round(self.sensor.co2c.value))
-        else:
-            co2c = "---"
         html = """
         <html><head><title>Svante Web Interface</title>
         <meta name="viewport" content="width=device-width, initial-scale=1">
@@ -272,10 +271,10 @@ class WebServer:
         .button2{background-color: #4286f4;}</style>
         </head><body>
         <h1>Svante Web Interface</h1>
-        <p>Temperature: <strong>""" + str(round(self.sensor.temp.value,1)) + """ (""" + str(round(self.sensor.temp2.value,1)) + """)</strong> &#176;C</p>
-        <p>Pressure: <strong>""" + str(round(self.sensor.pres.value/100)) + """</strong> hPa</p>
-        <p>Humidity: <strong>""" + str(round(self.sensor.humi.value,1)) + """ (""" + str(round(self.sensor.humi2.value,1)) + """)</strong> &#37;</p>
-        <p>CO<sub>2</sub> concentraion: <strong>""" + co2c + """</strong> ppm</p>
+        <p>Temperature: <strong>""" + str(self.sensor.temp.value) + """ (""" + str(self.sensor.temp2.value) + """)</strong> &#176;C</p>
+        <p>Pressure: <strong>""" + str(self.sensor.pres.value) + """</strong> hPa</p>
+        <p>Humidity: <strong>""" + str(self.sensor.humi.value) + """ (""" + str(self.sensor.humi2.value) + """)</strong> &#37;</p>
+        <p>CO<sub>2</sub> concentraion: <strong>""" + str(self.sensor.co2c.value) + """</strong> ppm</p>
         <p><a href="/?read"><button class="button">READ</button></a></p>
         </body></html>\n"""
         return html
@@ -295,7 +294,7 @@ webserver = WebServer(led, display, sensor)
 # seperate measurement into continuous sensor logging, display and led updating, define them as coros for asyncio!!!
 async def measurement(sleep):
     while True:
-        print('M')
+        print('Measurement!')
         sensor.read()
         if sensor.co2c.value >= CRITICAL_LEVEL:
             led.red()
